@@ -1,8 +1,8 @@
 ############################################################################
-#               UT2004 Sever Stats Monitor            by Snoop, 2019       # 
+#               UT2004 Server Stats Monitor           by Snoop, 2019       # 
 ############################################################################
 
-import socket, os
+import socket, os, select
 from threading import Thread, Event
 from prettytable import PrettyTable
 import string
@@ -19,11 +19,11 @@ def extractString(pos, data, skip_first=0):
         return "", pos
     ln = int(data[pos])
     from_p = pos+1+skip_first;
-    to_p = pos+ln+1     
+    to_p = pos+ln+1    
     str = data[from_p:to_p].decode("ansi") 
     #printable = set(string.printable)
     #filter(lambda x: x in printable, str)
-    return str, pos+ln + 1
+    return str, to_p
 
 def escapeUTColorCharasters(str):
     res = ''; i=0
@@ -39,16 +39,24 @@ def escapeUTColorCharasters(str):
 
 def regestUT2004ServerData(server_address):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(0)
+    
     data = type('', (), {})()
-    data.players = b''
-    data.server = b''
+    data.players = data.server = b''
+    data.empty = False
     try:
         #send server info request
         sent = sock.sendto(b'\x80\x00\x00\x00\x03', server_address)
         sent = sock.sendto(b'\x80\x00\x00\x00\x00', server_address)
         #receive server info response
         while(True):
-            tmp, server = sock.recvfrom(4096)
+            ready = select.select([sock], [], [], 3)
+            if (ready[0]):
+                tmp, server = sock.recvfrom(4096)
+            else:
+                data.empty = True
+                #print("server request timeout...");
+                break; 
             #print(tmp,'\n====')
             if (len(tmp)<5): #empty section
                 continue;
@@ -61,7 +69,6 @@ def regestUT2004ServerData(server_address):
                 break;
     finally:
         sock.close()
-    print(data)
     return data
 
 def parseUT2004PlayersInfo(data):
@@ -73,7 +80,7 @@ def parseUT2004PlayersInfo(data):
         obj = type('', (), {})()
         obj.team = obj.id = '-'
         str, pos = extractString(pos,data);
-        obj.name = escapeUTColorCharasters(str)
+        obj.name = escapeUTColorCharasters(str)[:-1]
         obj.ping = int(data[pos])
         obj.score = int(data[pos+4])     
         if (pos+12<len(data)):
@@ -92,17 +99,17 @@ def parseUT2004BasicServerInfo(data):
     obj = type('', (), {})()
     obj.name = b'' 
     obj.name = obj.map = obj.type = obj.players = "none"
-
     #server name
     pos = 13
     str,pos = extractString(pos,data,1)
     obj.name = escapeUTColorCharasters(str)
- 
+    #map name
     pos+=1      
     str,pos= extractString(pos,data)
     obj.map = escapeUTColorCharasters(str)
-    
+    #game type
     obj.game_type, pos = extractString(pos,data)
+    #max/cur players
     obj.cur_players = int(data[pos])
     obj.max_players = int(data[pos+4])
     return obj
@@ -115,6 +122,8 @@ class MyThread(Thread):
 
     def tick(self):
         raw_data = regestUT2004ServerData(server_address)
+        if (raw_data.empty == True):
+            return
         players_info = parseUT2004PlayersInfo(raw_data.players);
         basic_server_info = parseUT2004BasicServerInfo(raw_data.server)
         os.system('cls')
