@@ -8,34 +8,26 @@ from prettytable import PrettyTable
 import string
 
 #===========================================================================
-#server_address = ('52.57.28.68', 7767 + 1) #ZORDON AS
-server_address = ('116.203.71.213',51337 + 1) #TR TAM
-#server_address = ('208.79.234.80',9000 + 1) #Omnip ONS
-#server_address = ('81.30.148.30', 32800 + 1) #FAIR-games DM
+server_address = ('80.4.151.145', 7777 + 1) #MIASMA.ROCK (vCTF)
+#server_address = ('109.230.224.189', 6969 + 1) #TUS (TAM)
+#server_address = ('52.57.28.68', 7767 + 1) #ZORDON (AS)
+#server_address = ('81.30.148.30', 32800 + 1) #Fair games (DM)
 #===========================================================================
 
-def extractString(pos, data, skip_first=0):
-    if (pos>=len(data)):
-        return "", pos
-    ln = int(data[pos])
-    from_p = pos+1+skip_first;
-    to_p = pos+ln+1    
-    str = data[from_p:to_p].decode("ansi") 
-    #printable = set(string.printable)
-    #filter(lambda x: x in printable, str)
-    return str, to_p
-
-def escapeUTColorCharasters(str):
-    res = ''; i=0
-    while(i < len(str)):
-        if (ord(str[i]) == 0x1b): #if byte color flag then escape RGB triplet
-            i+=4;
-        if (i >= len(str)):
+def parseString(pos, data):
+    i = pos + 1
+    res = ""
+    while True:
+        if (data[i] == 0): #end of the string
             break;
-        res += str[i]
+        if (data[i] == 0x1b): #byte color flag then escape RGB triplet
+            i+=4;
+        res += chr(data[i])
         i+=1
-    #print("result:",res)
-    return res;
+    return res, i+1
+
+def parseInt(pos, data):
+    return int(data[pos]), pos + 4;
 
 def regestUT2004ServerData(server_address):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -79,19 +71,24 @@ def parseUT2004PlayersInfo(data):
     while(True): 
         obj = type('', (), {})()
         obj.team = obj.id = '-'
-        str, pos = extractString(pos,data);
-        obj.name = escapeUTColorCharasters(str)[:-1]
-        obj.ping = int(data[pos])
-        obj.score = int(data[pos+4])     
-        if (pos+12<len(data)):
-            obj.id = data[pos+12]
-            team = data[pos+11];
-            if (team == 0x40): obj.team = 'blue'
-            if (team == 0x20): obj.team = 'red'
-            if (team == 0x00): obj.team = '-'
+        obj.name, pos = parseString(pos, data);
+        obj.ping, pos = parseInt(pos, data);
+        obj.score, pos = parseInt(pos, data);
+
+        team, pos = parseInt(pos+3, data);
+        pos -=3;
+
+        teams = {0x00 : "-",
+                 0x20 : "red",
+                 0x40 : "blue"}
+
+        obj.team = teams[team]
+
         result.append(obj)
-        pos += 16
-        if (pos + 1 >= len(data)):
+
+        if pos+4 < len(data):
+            obj.id, pos = parseInt(pos, data);
+        else:
             break
     return result
 
@@ -101,17 +98,14 @@ def parseUT2004BasicServerInfo(data):
     obj.name = obj.map = obj.type = obj.players = "none"
     #server name
     pos = 13
-    str,pos = extractString(pos,data,1)
-    obj.name = escapeUTColorCharasters(str)
+    obj.name, pos = parseString(pos,data)
     #map name
-    pos+=1      
-    str,pos= extractString(pos,data)
-    obj.map = escapeUTColorCharasters(str)
+    obj.map, pos = parseString(pos,data)
     #game type
-    obj.game_type, pos = extractString(pos,data)
+    obj.game_type, pos = parseString(pos,data)
     #max/cur players
-    obj.cur_players = int(data[pos])
-    obj.max_players = int(data[pos+4])
+    obj.cur_players, pos = parseInt(pos, data)
+    obj.max_players, pos = parseInt(pos, data)
     return obj
 
 class MyThread(Thread):
