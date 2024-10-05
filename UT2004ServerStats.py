@@ -6,15 +6,16 @@
 
 import socket, os, select
 from threading import Thread, Event
+from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict
-from enum import Enum
+from typing import Optional
 
 #===========================================================================
-server_address = ('80.4.151.145', 7777 + 1) #MIASMA.ROCK (vCTF)
-#server_address = ('109.230.224.189', 6969 + 1) #TUS (TAM)
-#server_address = ('52.57.28.68', 7767 + 1) #ZORDON (AS)
-#server_address = ('81.30.148.30', 32800 + 1) #Fair games (DM)
+TARGET_SERVER_ADDRESS = ('109.230.224.189', 6969) # TUS (TAM)
+#TARGET_SERVER_ADDRESS = ('81.30.148.30', 32800) # Fair games (DM)
+#TARGET_SERVER_ADDRESS = ('194.26.183.119', 7788) # CEONSS (ONS)
+#TARGET_SERVER_ADDRESS = ('80.4.151.145', 7777) # MIASMA (VCTF)
 #===========================================================================
 
 class PlayerTeam(Enum):
@@ -31,6 +32,11 @@ class PlayerInfo:
     team : PlayerTeam  = PlayerTeam.UNKNOWN
     id : int    = -1
 
+    def get_country_code(self) -> Optional[str]:
+        if len(self.name) > 4 and self.name[-4] == "(" and self.name[-1] == ")":
+            return self.name[-3:-1]
+        return ""
+
 @dataclass
 class ServerInfo:
     name : str = ""
@@ -40,31 +46,9 @@ class ServerInfo:
     max_players : int = 0
     settings: Dict[str, str] = field(default_factory=dict)
 
-class FormattedTable:
-    def __init__(self, headers : list[str]):
-        self.headers = headers
-        self.rows = []
-
-    def add_row(self, row : list[str]):
-        self.rows.append(row)
-
-    def print(self):
-        max_widths = [len(header) for header in self.headers]
-        for row in self.rows:
-            for i, cell in enumerate(row):
-                max_widths[i] = max(max_widths[i], len(cell))
-
-        header = " | ".join([header.ljust(max_widths[i]) for i, header in enumerate(self.headers)])
-        print(header)
-        print("-" * len(header))
-        for row in self.rows:
-            row_str = " | ".join([cell.ljust(max_widths[i]) for i, cell in enumerate(row)])
-            print(row_str)
-
-    def clear_rows(self):
-        self.rows = []
-
 class UT2004RawData:
+
+    """ Helper class to parse data from raw UT2004 server response """
 
     def __init__(self, bytes):
         self.bytes = bytes
@@ -106,95 +90,134 @@ class UT2004RawData:
     def is_eof(self) -> bool:
         return self.pos >= self.length
 
-def regestUT2004ServerData(server_address) -> tuple[ServerInfo, list[PlayerInfo]]:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setblocking(0)
+class UT2004Server:
 
-    players_data = b''
-    server_basic_data = b''
-    server_settings_data = b''
+    """ UT2004 server info provider """
 
-    try:
-        #send server info request
-        sent = sock.sendto(b'\x80\x00\x00\x00\x03', server_address)
-        sent = sock.sendto(b'\x80\x00\x00\x00\x00', server_address)
-        #receive server info response
-        while(True):
-            ready = select.select([sock], [], [], 3)
-            if (ready[0]):
-                tmp, server = sock.recvfrom(4096)
-            else:
-                break
+    def __init__(self, server_ip : str, server_port : int):
+        self.server_address = (server_ip, server_port + 1)
+        self.ip = server_ip
+        self.port = server_port
 
-            if len(tmp) < 5: #empty section
-                continue
+    def getInfo(self) -> tuple[ServerInfo, list[PlayerInfo]]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(1)
 
-            packet_type = tmp[4]
-            packet_payload = tmp[5:]
+        players_data = b''
+        server_basic_data = b''
+        server_settings_data = b''
 
-            if (packet_type == 0x01): #mutators and server setting section
-                server_settings_data += packet_payload
-            if (packet_type == 0x02): #players info section
-                players_data += packet_payload
-            if (packet_type == 0x00): #server info section
-                server_basic_data += packet_payload
-                break
-    finally:
-        sock.close()
+        try:
+            #send server info request
+            sock.sendto(b'\x80\x00\x00\x00\x03', self.server_address)
+            sock.sendto(b'\x80\x00\x00\x00\x00', self.server_address)
+            #receive server info response
+            while(True):
+                ready = select.select([sock], [], [], 3)
+                if (ready[0]):
+                    tmp, server = sock.recvfrom(4096)
+                else:
+                    break
 
-    server_info = parseUT2004BasicServerInfo(server_basic_data, server_settings_data)
-    players_info = parseUT2004PlayersInfo(players_data)
+                if len(tmp) < 5: #empty section
+                    continue
 
-    return server_info, players_info
+                packet_type = tmp[4]
+                packet_payload = tmp[5:]
 
-def parseUT2004PlayersInfo(data) -> list[PlayerInfo]:
-    rawData = UT2004RawData(data)
-    rawData.seek(4) # offset
-    result = []
+                if (packet_type == 0x01): #mutators and server setting section
+                    server_settings_data += packet_payload
+                if (packet_type == 0x02): #players info section
+                    players_data += packet_payload
+                if (packet_type == 0x00): #server info section
+                    server_basic_data += packet_payload
+                    break
+        finally:
+            sock.close()
 
-    while not rawData.is_eof():
-        player = PlayerInfo()
-        player.name = rawData.read_string()
-        player.ping = rawData.read_int32()
-        player.score = rawData.read_int32()
-        team = rawData.read_int8()
-        player.id = rawData.read_int32()
+        server_info = self._parseUT2004BasicServerInfo(server_basic_data, server_settings_data)
+        players_info = self._parseUT2004PlayersInfo(players_data)
 
-        teams = {0x00 : PlayerTeam.SPEC,
-                 0x20 : PlayerTeam.RED,
-                 0x40 : PlayerTeam.BLUE}
+        return server_info, players_info
 
-        player.team = teams.get(team, PlayerTeam.UNKNOWN)
-        result.append(player)
-    return result
+    def _parseUT2004PlayersInfo(self, data) -> list[PlayerInfo]:
+        raw_data = UT2004RawData(data)
+        raw_data.seek(4) # offset
+        result = []
 
-def parseUT2004BasicServerInfo(basic_data, settings_data) -> ServerInfo:
-    server_info = ServerInfo()
+        while not raw_data.is_eof():
+            player = PlayerInfo()
+            player.name = raw_data.read_string()
+            player.ping = raw_data.read_int32()
+            player.score = raw_data.read_int32()
+            team = raw_data.read_int8()
+            player.id = raw_data.read_int32()
 
-    # parse basic server info
-    rawData = UT2004RawData(basic_data)
-    rawData.seek(13) # offset
-    server_info.name = rawData.read_string()
-    server_info.map = rawData.read_string()
-    server_info.game_type = rawData.read_string()
-    server_info.cur_players = rawData.read_int32()
-    server_info.max_players = rawData.read_int32()
+            teams = {0x00 : PlayerTeam.SPEC,
+                     0x20 : PlayerTeam.RED,
+                     0x40 : PlayerTeam.BLUE}
 
-    # parse server settings
-    rawData = UT2004RawData(settings_data)
-    while not rawData.is_eof():
-        key = rawData.read_string()
-        value = rawData.read_string()
-        server_info.settings[key] = value
+            player.team = teams.get(team, PlayerTeam.UNKNOWN)
+            result.append(player)
+        return result
 
-    return server_info
+    def _parseUT2004BasicServerInfo(self, basic_data, settings_data) -> ServerInfo:
+        server_info = ServerInfo()
+
+        # parse basic server info
+        raw_data = UT2004RawData(basic_data)
+        raw_data.seek(13) # offset
+        server_info.name = raw_data.read_string()
+        server_info.map = raw_data.read_string()
+        server_info.game_type = raw_data.read_string()
+        server_info.cur_players = raw_data.read_int32()
+        server_info.max_players = raw_data.read_int32()
+
+        # parse server settings
+        raw_data = UT2004RawData(settings_data)
+        while not raw_data.is_eof():
+            key = raw_data.read_string()
+            value = raw_data.read_string()
+            server_info.settings[key] = value
+
+        return server_info
+
+class FormattedTable:
+
+    """ Class to print formatted tables """
+
+    def __init__(self, headers : list[str]):
+        self.headers = headers
+        self.rows = []
+
+    def add_row(self, row : list[str]):
+        self.rows.append(row)
+
+    def print(self):
+        max_widths = [len(header) for header in self.headers]
+        for row in self.rows:
+            for i, cell in enumerate(row):
+                max_widths[i] = max(max_widths[i], len(cell))
+
+        header = " | ".join([header.ljust(max_widths[i]) for i, header in enumerate(self.headers)])
+        print(header)
+        print("-" * len(header))
+        for row in self.rows:
+            row_str = " | ".join([cell.ljust(max_widths[i]) for i, cell in enumerate(row)])
+            print(row_str)
+
+    def clear_rows(self):
+        self.rows = []
 
 class MyThread(Thread):
-    def __init__(self, event, server_address):
+
+    """ Thread class to monitor UT2004 server stats"""
+
+    def __init__(self, event):
         Thread.__init__(self)
         self.stopped = event
-        self.address = server_address
         self.table = FormattedTable(["Name", "Score", "Ping", "Team", "ID"])
+        self.ut_server  = UT2004Server(TARGET_SERVER_ADDRESS[0], TARGET_SERVER_ADDRESS[1])
 
     def clean(self):
         if os.name == 'nt':
@@ -203,14 +226,14 @@ class MyThread(Thread):
             os.system('clear')
 
     def tick(self):
-        basic_server_info, players_info = regestUT2004ServerData(server_address)
+        basic_server_info, players_info = self.ut_server.getInfo()
 
         self.clean()
-        print(f"SERVER: {basic_server_info.name}")
+        print(f"SERVER: {basic_server_info.name} GAME TYPE: {basic_server_info.game_type}")
         print(f"MAP: {basic_server_info.map} Players: {basic_server_info.cur_players} / {basic_server_info.max_players}")
         self.table.clear_rows()
-        for row in players_info:
-            self.table.add_row([row.name, str(row.score), str(row.ping), str(row.team.value), str(row.id)])
+        for player in players_info:
+            self.table.add_row([player.name, str(player.score), str(player.ping), str(player.team.value), str(player.id)])
         self.table.print()
 
         # print("Server settings:")
@@ -227,7 +250,7 @@ class MyThread(Thread):
 
 def main():
     stop_thread = Event()
-    thread = MyThread(stop_thread, server_address)
+    thread = MyThread(stop_thread)
     thread.start()
 
 if __name__ == "__main__":
